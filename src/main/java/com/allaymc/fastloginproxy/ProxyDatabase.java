@@ -8,25 +8,37 @@ import java.sql.Statement;
 
 public class ProxyDatabase {
 
-    private final Path dataDirectory;
+    private final Path dataFolder;
     private Connection connection;
 
-    public ProxyDatabase(Path dataDirectory) {
-        this.dataDirectory = dataDirectory;
+    public ProxyDatabase(Path dataFolder) {
+        this.dataFolder = dataFolder;
     }
 
-    public void connect() throws SQLException {
-        this.connection = DriverManager.getConnection("jdbc:sqlite:" + dataDirectory.resolve("proxy-auth.db"));
+    public void connect() throws Exception {
 
-        try (Statement st = connection.createStatement()) {
-            st.executeUpdate("""
-                CREATE TABLE IF NOT EXISTS premium_profiles (
-                    username TEXT PRIMARY KEY,
-                    premium INTEGER NOT NULL DEFAULT 0,
-                    last_verified_at INTEGER NOT NULL DEFAULT 0
-                )
-            """);
+        // FORCE LOAD SQLITE DRIVER
+        try {
+            Class.forName("org.sqlite.JDBC");
+        } catch (ClassNotFoundException e) {
+            throw new Exception("SQLite driver not found inside plugin jar!", e);
         }
+
+        String url = "jdbc:sqlite:" + dataFolder.resolve("proxy-auth.db");
+
+        connection = DriverManager.getConnection(url);
+
+        Statement stmt = connection.createStatement();
+
+        stmt.executeUpdate("""
+        CREATE TABLE IF NOT EXISTS premium_players (
+            username TEXT PRIMARY KEY,
+            uuid TEXT,
+            premium INTEGER
+        )
+        """);
+
+        stmt.close();
     }
 
     public Connection getConnection() {
