@@ -1,42 +1,77 @@
 package com.allaymc.fastloginproxy;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URI;
+import java.sql.PreparedStatement;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
-public class MojangLookupService {
+public class ProxyAuthService {
 
-    private final int timeoutMs;
+    private final ProxyDatabase database;
+    private final MojangLookupService mojangLookupService;
+    private final int verificationWindowSeconds;
 
-    public MojangLookupService(int timeoutMs) {
-        this.timeoutMs = timeoutMs;
+    private final Map<String, Long> verificationMap = new ConcurrentHashMap<>();
+    private final Map<UUID, AuthMode> resolvedModes = new ConcurrentHashMap<>();
+
+    public ProxyAuthService(ProxyDatabase database, MojangLookupService mojangLookupService, int verificationWindowSeconds) {
+        this.database = database;
+        this.mojangLookupService = mojangLookupService;
+        this.verificationWindowSeconds = verificationWindowSeconds;
     }
 
-    public boolean isPremiumName(String username) {
-        try {
-            String url = "https://api.mojang.com/users/profiles/minecraft/" + username;
-            HttpURLConnection connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(timeoutMs);
-            connection.setReadTimeout(timeoutMs);
+    public boolean needsFirstJoinVerification(String username) {
+        long now = System.currentTimeMillis();
+        Long firstSeen = verificationMap.get(username);
 
-            int code = connection.getResponseCode();
-            if (code != 200) {
-                return false;
-            }
+        if (firstSeen == null || (now - firstSeen) > verificationWindowSeconds * 1000L) {
+            verificationMap.put(username, now);
+            return true;
+        }
 
-            StringBuilder response = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    response.append(line);
-                }
-            }
+        return false;
+    }
 
-            return response.toString().contains("\"id\"");
-        } catch (Exception e) {
-            return false;
+    public AuthMode resolveMode(String username, UUID uuid) {
+        long now = System.currentTimeMillis();
+        Long firstSeen = verificationMap.get(username);
+
+        if (firstSeen == null || (now - firstSeen) > verificationWindowSeconds * 1000L) {
+            return null;
+        }
+
+        verificationMap.remove(username);
+
+        AuthMode mode = mojangLookupService.isPremiumName(username) ? AuthMode.PREMIUM : AuthMode.CRACKED;
+        resolvedModes.put(uuid, mode);
+
+        if (mode == AuthMode.PREMIUM) {
+            savePremium(username);
+        }
+
+        return mode;
+    }
+
+    public AuthMode getResolvedMode(UUID uuid) {
+        return resolvedModes.get(uuid);
+    }
+
+    public void clear(UUID uuid) {
+        resolvedModes.remove(uuid);
+    }
+
+    private void savePremium(String username) {
+        try (PreparedStatement ps = database.getConnection().prepareStatement("""
+                INSERT INTO premium_profiles(username, premium, last_verified_at)
+                VALUES (?, 1, ?)
+                ON CONFLICT(username) DO UPDATE SET
+                    premium = 1,
+                    last_verified_at = excluded.last_verified_at
+                """)) {
+            ps.setString(1, username);
+            ps.setLong(2, System.currentTimeMillis());
+            ps.executeUpdate();
+        } catch (Exception ignored) {
         }
     }
 }
